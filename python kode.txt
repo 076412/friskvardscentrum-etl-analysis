@@ -1,0 +1,218 @@
+import pandas as pd
+import numpy as np
+import sqlite3
+import matplotlib.pyplot as plt
+from transformers import pipeline
+
+# -----------------------------
+# Sentiment modell (BERT)
+# -----------------------------
+sentiment_model = pipeline("sentiment-analysis")
+
+def analyze_sentiment(text):
+    if pd.isna(text):
+        return None
+    result = sentiment_model(str(text)[:512])[0]
+
+    if result["label"] == "POSITIVE":
+        return "positive"
+    elif result["label"] == "NEGATIVE":
+        return "negative"
+    else:
+        return "neutral"
+
+
+# -----------------------------
+# Extract
+# -----------------------------
+def extract_data(file_path):
+    df = pd.read_csv(file_path)
+    return df
+
+
+# -----------------------------
+# Clean data
+# -----------------------------
+def clean_data(df):
+
+    # Ta bort dubbletter
+    df = df.drop_duplicates()
+
+    # Trimma text
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.strip()
+
+    # -------------------
+    # Normalisera status
+    # -------------------
+    df["status"] = df["status"].str.lower()
+
+    status_map = {
+        "genomförd": "completed",
+        "completed": "completed",
+        "avbokad": "cancelled",
+        "cancelled": "cancelled",
+        "no show": "no_show",
+        "noshow": "no_show",
+        "bokad": "booked"
+    }
+
+    df["status"] = df["status"].replace(status_map)
+
+    # -------------------
+    # Normalisera passnamn
+    # -------------------
+    df["passnamn"] = df["passnamn"].str.lower()
+
+    class_map = {
+        "spin": "Spinning",
+        "spinning": "Spinning",
+        "indoor cycling": "Spinning",
+        "cykel": "Spinning"
+    }
+
+    df["passnamn"] = df["passnamn"].replace(class_map)
+
+    # -------------------
+    # Normalisera medlemstyp
+    # -------------------
+    df["medlemstyp"] = df["medlemstyp"].str.lower()
+
+    member_map = {
+        "bas": "Bas",
+        "basic": "Bas",
+        "premium": "Premium"
+    }
+
+    df["medlemstyp"] = df["medlemstyp"].replace(member_map)
+
+    # -------------------
+    # Svenska månader
+    # -------------------
+    months_sv = {
+        "januari": "01",
+        "februari": "02",
+        "mars": "03",
+        "april": "04",
+        "maj": "05",
+        "juni": "06",
+        "juli": "07",
+        "augusti": "08",
+        "september": "09",
+        "oktober": "10",
+        "november": "11",
+        "december": "12"
+    }
+
+    for sv, num in months_sv.items():
+        df["passdatum"] = df["passdatum"].astype(str).str.replace(sv, num)
+
+    df["passdatum"] = pd.to_datetime(df["passdatum"], errors="coerce")
+    df["bokningsdatum"] = pd.to_datetime(df["bokningsdatum"], errors="coerce")
+
+    # -------------------
+    # Logiska kontroller
+    # -------------------
+
+    # Bokningsdatum efter passdatum tas bort
+    df = df[df["bokningsdatum"] <= df["passdatum"]]
+
+    # Negativa kostnader
+    df.loc[df["månadskostnad"] <= 0, "månadskostnad"] = np.nan
+
+    # Orimliga födelseår
+    df.loc[df["födelseår"] < 1920, "födelseår"] = np.nan
+    df.loc[df["födelseår"] > 2015, "födelseår"] = np.nan
+
+    # Feedback endast för genomförda pass
+    df.loc[df["status"] != "completed", "feedback"] = np.nan
+
+    return df
+
+
+# -----------------------------
+# Feature engineering
+# -----------------------------
+def feature_engineering(df):
+
+    df["weekday"] = df["passdatum"].dt.weekday
+    df["month"] = df["passdatum"].dt.month
+    df["age"] = 2024 - df["födelseår"]
+
+    return df
+
+
+# -----------------------------
+# Sentiment analys
+# -----------------------------
+def add_sentiment(df):
+
+    df["sentiment"] = df["feedback"].apply(analyze_sentiment)
+
+    return df
+
+
+# -----------------------------
+# Load till SQLite
+# -----------------------------
+def load_to_sqlite(df, db_name="friskvard.db"):
+
+    conn = sqlite3.connect(db_name)
+
+    df.to_sql("bookings", conn, if_exists="append", index=False)
+
+    conn.close()
+
+
+# -----------------------------
+# KPI visualisering
+# -----------------------------
+def plot_kpis(df):
+
+    cancel_rate = df.groupby("month")["status"].apply(
+        lambda x: (x == "cancelled").mean()
+    )
+
+    cancel_rate.plot(kind="bar")
+    plt.title("Avbokningsfrekvens per månad")
+    plt.show()
+
+    bookings_weekday = df.groupby("weekday").size()
+
+    bookings_weekday.plot(kind="bar")
+    plt.title("Bokningar per veckodag")
+    plt.show()
+
+    sentiment_dist = df["sentiment"].value_counts()
+
+    sentiment_dist.plot(kind="bar")
+    plt.title("Sentimentfördelning")
+    plt.show()
+
+
+# -----------------------------
+# Pipeline
+# -----------------------------
+def run_pipeline(file_path):
+
+    df = extract_data(file_path)
+
+    df = clean_data(df)
+
+    df = feature_engineering(df)
+
+    df = add_sentiment(df)
+
+    return df
+
+
+# -----------------------------
+# Kör pipeline
+# -----------------------------
+df_clean = run_pipeline("friskvard_data.csv")
+load_to_sqlite(df_clean)
+
+df_val_clean = run_pipeline("friskvard_validation.csv")
+load_to_sqlite(df_val_clean)
+
+plot_kpis(df_clean)
